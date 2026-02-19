@@ -139,7 +139,7 @@ void Server::setup_web_serving() {
         std::ifstream ifs(index_path);
         std::string body((std::istreambuf_iterator<char>(ifs)),
                           std::istreambuf_iterator<char>());
-        res.set_content(body, "text/html");
+        res.set_content(body, "text/html; charset=utf-8");
     };
 
     svr_.Get("/", serve_index);
