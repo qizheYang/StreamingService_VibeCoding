@@ -104,8 +104,10 @@
             if (Hls.isSupported()) {
                 hls = new Hls({
                     enableWorker: true,
-                    lowLatencyMode: true,
-                    backBufferLength: 90,
+                    lowLatencyMode: false,
+                    backBufferLength: 300,
+                    liveSyncDurationCount: 5,
+                    liveMaxLatencyDurationCount: 10,
                 });
                 hls.loadSource(HLS_SRC);
                 hls.attachMedia(video);
