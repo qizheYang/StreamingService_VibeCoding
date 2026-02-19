@@ -1,0 +1,118 @@
+name: Deploy Streaming Service
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-web:
+    name: Deploy Web Player
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: qizheYang/rehydratedwater.com
+          token: ${{ secrets.REHYDRATEDWATERCOM }}
+          path: target-repo
+
+      - name: Copy web files
+        run: |
+          mkdir -p target-repo/streamingservice
+          cp web/index.html target-repo/streamingservice/
+
+      - name: Commit and push
+        run: |
+          cd target-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add streamingservice/
+          git diff --staged --quiet || git commit -m "Auto-deploy streaming service web from ${{ github.repository }}"
+          git push
+
+  deploy-server:
+    name: Deploy Server Binary
+    runs-on: ubuntu-latest
+    needs: deploy-web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+
+            # Clone/update the repo
+            if [ -d /tmp/streamingservice ]; then
+              cd /tmp/streamingservice && git pull
+            else
+              git clone https://github.com/${{ github.repository }}.git /tmp/streamingservice
+              cd /tmp/streamingservice
+            fi
+
+            # Ensure build dependencies
+            sudo apt-get install -y cmake g++ libssl-dev > /dev/null 2>&1 || true
+
+            # Build
+            cmake -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build -j$(nproc)
+
+            # Prepare server directory
+            sudo mkdir -p /var/www/streaming-service/bin
+            sudo mkdir -p /var/www/hls
+            sudo chown www-data:www-data /var/www/hls
+
+            # Atomic binary swap
+            sudo cp build/streaming-service /var/www/streaming-service/bin/streaming-service_new
+            sudo cp config.json /var/www/streaming-service/
+            sudo cp -r web /var/www/streaming-service/
+            sudo sed -i 's|"./web"|"/var/www/streaming-service/web"|' /var/www/streaming-service/config.json
+            sudo mv /var/www/streaming-service/bin/streaming-service_new /var/www/streaming-service/bin/streaming-service
+
+            # Install nginx RTMP config if needed
+            if ! grep -q "rtmp {" /etc/nginx/nginx.conf; then
+              cat nginx/rtmp.conf | sudo tee -a /etc/nginx/nginx.conf
+              sudo nginx -t && sudo systemctl reload nginx
+            fi
+
+            # Install/update nginx site config
+            sudo cp nginx/site.conf /etc/nginx/sites-available/streamingservice
+            sudo ln -sf /etc/nginx/sites-available/streamingservice /etc/nginx/sites-enabled/
+            sudo nginx -t && sudo systemctl reload nginx
+
+            # Install systemd service
+            sudo tee /etc/systemd/system/streaming-service.service > /dev/null << 'UNIT'
+            [Unit]
+            Description=Streaming Service Backend
+            After=network.target nginx.service
+
+            [Service]
+            Type=simple
+            User=www-data
+            Group=www-data
+            WorkingDirectory=/var/www/streaming-service
+            ExecStart=/var/www/streaming-service/bin/streaming-service -c /var/www/streaming-service/config.json
+            Environment=PORT=8085
+            Restart=always
+            RestartSec=5
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable streaming-service
+            sudo systemctl restart streaming-service
+
+            # Clean up
+            rm -rf /tmp/streamingservice
+
+            echo "Deploy complete!"
